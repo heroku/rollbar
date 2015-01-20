@@ -11,7 +11,7 @@ or allocated, we use the stack information from where the error was reported.
 Documentation
 =============
 
-[API docs on godoc.org](http://godoc.org/github.com/stvp/rollbar)
+[API docs on godoc.org](http://godoc.org/github.com/heroku/rollbar)
 
 Usage
 =====
@@ -54,7 +54,8 @@ And verify the reported errors manually.
 Contributors
 ============
 
-A big thank you to everyone who has contributed pull requests and bug reports:
+This library was originally written by @tysontate. A big thank you goes to
+everyone who has contributed pull requests and bug reports:
 
 * @kjk
 * @Soulou
