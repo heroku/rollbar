@@ -1,230 +1,318 @@
 package rollbar
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"hash/adler32"
-	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
-	NAME    = "heroku/rollbar"
-	VERSION = "0.4.1"
+	// NAME is the name of this notifier library as reported to the Rollbar API.
+	NAME = "go-rollbar"
 
-	// Severity levels
-	CRIT  = "critical"
-	ERR   = "error"
-	WARN  = "warning"
-	INFO  = "info"
+	// VERSION is the version number of this notifier library as reported to the
+	// Rollbar API.
+	VERSION = "0.4.0"
+
+	// CRIT is the critical Rollbar severity level as reported to the Rollbar
+	// API.
+	CRIT = "critical"
+
+	// ERR is the error Rollbar severity level as reported to the Rollbar API.
+	ERR = "error"
+
+	// WARN is the warning Rollbar severity level as reported to the Rollbar API.
+	WARN = "warning"
+
+	// INFO is the info Rollbar severity level as reported to the Rollbar API.
+	INFO = "info"
+
+	// DEBUG is the debug Rollbar severity level as reported to the Rollbar API.
 	DEBUG = "debug"
 
+	// FILTERED is the text that replaces all sensitive values in items sent to
+	// the Rollbar API.
 	FILTERED = "[FILTERED]"
 )
 
 var (
-	hostname, _ = os.Hostname()
-	std         = NewAsync("", "development", "", hostname, "")
+	// Token is the Rollbar access token under which all items will be reported.
+	// If Token is blank, no errors will be reported to Rollbar.
+	Token = ""
+
+	// Environment is the environment under which all items will be reported.
+	Environment = "development"
+
+	// Platform is the platform reported for all Rollbar items. The default is
+	// the running operating system (darwin, freebsd, linux, etc.) but it can
+	// also be application specific (client, heroku, etc.).
+	Platform = runtime.GOOS
+
+	// Endpoint is the URL destination for all Rollbar item POST requests.
+	Endpoint = "https://api.rollbar.com/api/1/item/"
+
+	// Buffer is the maximum number of errors that will be queued for sending.
+	// When the buffer is full, new errors are dropped on the floor until the API
+	// can catch up.
+	Buffer = 1000
+
+	// FilterFields is a regular expression that matches field names that should
+	// not be sent to Rollbar. Values for these fields are replaced with
+	// "[FILTERED]".
+	FilterFields = regexp.MustCompile("password|secret|token")
+
+	// ErrorWriter is the destination for errors encountered while POSTing items
+	// to Rollbar. By default, this is stderr. This can be nil.
+	ErrorWriter = os.Stderr
+
+	// CodeVersion is the optional code version reported to the Rollbar API for
+	// all items.
+	CodeVersion = ""
+
+	// Server Root is used for determined what code paths are project-local
+	ServerRoot = ""
+
+	bodyChannel chan map[string]interface{}
+	waitGroup   sync.WaitGroup
+	postErrors  chan error
+	nilErrTitle = "<nil>"
 )
 
-// Rollbar access token.
-func SetToken(token string) {
-	std.SetToken(token)
+// Field is a custom data field used to report arbitrary data to the Rollbar
+// API.
+type Field struct {
+	Name string
+	Data interface{}
 }
 
-// All errors and messages will be submitted under this environment.
-func SetEnvironment(environment string) {
-	std.SetEnvironment(environment)
-}
+// -- Setup
 
-// String describing the running code version on the server
-func SetCodeVersion(codeVersion string) {
-	std.SetCodeVersion(codeVersion)
-}
+func init() {
+	bodyChannel = make(chan map[string]interface{}, Buffer)
+	postErrors = make(chan error, Buffer)
 
-// host: The server hostname. Will be indexed.
-func SetServerHost(serverHost string) {
-	std.SetServerHost(serverHost)
-}
-
-// root: Path to the application code root, not including the final slash.
-// Used to collapse non-project code when displaying tracebacks.
-func SetServerRoot(serverRoot string) {
-	std.SetServerRoot(serverRoot)
-}
-
-// custom: Any arbitrary metadata you want to send.
-func SetCustom(custom map[string]interface{}) {
-	std.SetCustom(custom)
-}
-
-// -- Getters
-
-// Rollbar access token.
-func GetToken() string {
-	return std.GetToken()
-}
-
-// All errors and messages will be submitted under this environment.
-func GetEnvironment() string {
-	return std.GetEnvironment()
-}
-
-// String describing the running code version on the server
-func GetCodeVersion() string {
-	return std.GetCodeVersion()
-}
-
-// host: The server hostname. Will be indexed.
-func GetServerHost() string {
-	return std.GetServerHost()
-}
-
-// root: Path to the application code root, not including the final slash.
-// Used to collapse non-project code when displaying tracebacks.
-func GetServerRoot() string {
-	return std.GetServerRoot()
-}
-
-// custom: Any arbitrary metadata you want to send.
-func GetCustom() map[string]interface{} {
-	return std.GetCustom()
+	go func() {
+		var err error
+		for body := range bodyChannel {
+			err = post(body)
+			if err != nil {
+				if len(postErrors) == cap(postErrors) {
+					<-postErrors
+				}
+				postErrors <- err
+			}
+			waitGroup.Done()
+		}
+		close(postErrors)
+	}()
 }
 
 // -- Error reporting
 
-// Error asynchronously sends an error to Rollbar with the given severity level.
-func Error(level string, err error) {
-	std.Error(level, err)
+func Errorf(level string, format string, args ...interface{}) {
+	ErrorWithStackSkip(level, fmt.Errorf(format, args...), 1)
 }
 
-// ErrorWithExtras asynchronously sends an error to Rollbar with the given
-// severity level with extra custom data.
-func ErrorWithExtras(level string, err error, extras map[string]interface{}) {
-	std.ErrorWithExtras(level, err, extras)
-}
-
-// RequestError asynchronously sends an error to Rollbar with the given
-// severity level and request-specific information.
-func RequestError(level string, r *http.Request, err error) {
-	std.RequestError(level, r, err)
-}
-
-// RequestErrorWithExtras asynchronously sends an error to Rollbar with the given
-// severity level and request-specific information with extra custom data.
-func RequestErrorWithExtras(level string, r *http.Request, err error, extras map[string]interface{}) {
-	std.RequestErrorWithExtras(level, r, err, extras)
+// Error asynchronously sends an error to Rollbar with the given severity
+// level. You can pass, optionally, custom Fields to be passed on to Rollbar.
+func Error(level string, err error, fields ...*Field) {
+	ErrorWithStackSkip(level, err, 1, fields...)
 }
 
 // ErrorWithStackSkip asynchronously sends an error to Rollbar with the given
-// severity level and a given number of stack trace frames skipped.
-func ErrorWithStackSkip(level string, err error, skip int) {
-	std.ErrorWithStackSkip(level, err, skip)
+// severity level and a given number of stack trace frames skipped. You can
+// pass, optionally, custom Fields to be passed on to Rollbar.
+func ErrorWithStackSkip(level string, err error, skip int, fields ...*Field) {
+	stack := BuildStack(2 + skip)
+	ErrorWithStack(level, err, stack, fields...)
 }
 
-// ErrorWithStackSkipWithExtras asynchronously sends an error to Rollbar with the given
-// severity level and a given number of stack trace frames skipped with extra custom data.
-func ErrorWithStackSkipWithExtras(level string, err error, skip int, extras map[string]interface{}) {
-	std.ErrorWithStackSkipWithExtras(level, err, skip, extras)
+// ErrorWithStack asynchronously sends and error to Rollbar with the given
+// stacktrace and (optionally) custom Fields to be passed on to Rollbar.
+func ErrorWithStack(level string, err error, stack Stack, fields ...*Field) {
+	buildAndPushError(level, err, stack, fields...)
+}
+
+// RequestError asynchronously sends an error to Rollbar with the given
+// severity level and request-specific information. You can pass, optionally,
+// custom Fields to be passed on to Rollbar.
+func RequestError(level string, r *http.Request, err error, fields ...*Field) {
+	RequestErrorWithStackSkip(level, r, err, 1, fields...)
 }
 
 // RequestErrorWithStackSkip asynchronously sends an error to Rollbar with the
 // given severity level and a given number of stack trace frames skipped, in
-// addition to extra request-specific information.
-func RequestErrorWithStackSkip(level string, r *http.Request, err error, skip int) {
-	std.RequestErrorWithStackSkip(level, r, err, skip)
+// addition to extra request-specific information. You can pass, optionally,
+// custom Fields to be passed on to Rollbar.
+func RequestErrorWithStackSkip(level string, r *http.Request, err error, skip int, fields ...*Field) {
+	stack := BuildStack(2 + skip)
+	RequestErrorWithStack(level, r, err, stack, fields...)
 }
 
-// RequestErrorWithStackSkipWithExtras asynchronously sends an error to Rollbar
-// with the given severity level and a given number of stack trace frames skipped,
-// in addition to extra request-specific information and extra custom data.
-func RequestErrorWithStackSkipWithExtras(level string, r *http.Request, err error, skip int, extras map[string]interface{}) {
-	std.RequestErrorWithStackSkipWithExtras(level, r, err, skip, extras)
+// RequestErrorWithStack asynchronously sends an error to Rollbar with the
+// given severity level, request-specific information provided by the given
+// http.Request, and a custom Stack. You You can pass, optionally, custom
+// Fields to be passed on to Rollbar.
+func RequestErrorWithStack(level string, r *http.Request, err error, stack Stack, fields ...*Field) {
+	buildAndPushError(level, err, stack, append(fields, &Field{Name: "request", Data: errorRequest(r)})...)
+}
+
+func buildError(level string, err error, stack Stack, fields ...*Field) map[string]interface{} {
+	title := nilErrTitle
+	if err != nil {
+		title = err.Error()
+	}
+
+	body := buildBody(level, title)
+	data := body["data"].(map[string]interface{})
+	errBody, fingerprint := errorBody(err, stack)
+	data["body"] = errBody
+	data["fingerprint"] = fingerprint
+
+	for _, field := range fields {
+		data[field.Name] = field.Data
+	}
+
+	return body
+}
+
+func buildAndPushError(level string, err error, stack Stack, fields ...*Field) {
+	push(buildError(level, err, stack, fields...))
 }
 
 // -- Message reporting
 
 // Message asynchronously sends a message to Rollbar with the given severity
-// level. Rollbar request is asynchronous.
+// level.
 func Message(level string, msg string) {
-	std.Message(level, msg)
-}
+	body := buildBody(level, msg)
+	data := body["data"].(map[string]interface{})
+	data["body"] = messageBody(msg)
 
-// MessageWithExtras asynchronously sends a message to Rollbar with the given severity
-// level with extra custom data. Rollbar request is asynchronous.
-func MessageWithExtras(level string, msg string, extras map[string]interface{}) {
-	std.MessageWithExtras(level, msg, extras)
-}
-
-// Wait will block until the queue of errors / messages is empty.
-func Wait() {
-	std.Wait()
+	push(body)
 }
 
 // -- Misc.
 
-// Errors can implement this interface to create a trace_chain
-// Callers are required to call BuildStack on their own at the
-// time the cause is wrapped.
-type CauseStacker interface {
-	error
-	Cause() error
-	Stack() Stack
+// PostErrors returns a channel that receives all errors encountered while
+// POSTing items to the Rollbar API.
+func PostErrors() <-chan error {
+	return postErrors
 }
 
-// Build an error inner-body for the given error. If skip is provided, that
-// number of stack trace frames will be skipped. If the error has a Cause
-// method, the causes will be traversed until nil.
-func errorBody(err error, skip int) (map[string]interface{}, string) {
-	var parent error
-	traceChain := []map[string]interface{}{}
-	fingerprint := ""
-	for err != nil {
-		stack := getOrBuildStack(err, parent, skip)
-		traceChain = append(traceChain, buildTrace(err, stack))
-		fingerprint = fingerprint + stack.Fingerprint()
-		parent = err
-		err = getCause(err)
+// Wait will block until the queue of errors / messages is empty. This allows
+// you to ensure that errors / messages are sent to Rollbar before exiting an
+// application.
+func Wait() {
+	waitGroup.Wait()
+}
+
+// Build the main JSON structure that will be sent to Rollbar with the
+// appropriate metadata.
+func buildBody(level, title string) map[string]interface{} {
+	timestamp := time.Now().Unix()
+	hostname, _ := os.Hostname()
+
+	data := map[string]interface{}{
+		"environment": Environment,
+		"title":       title,
+		"level":       level,
+		"timestamp":   timestamp,
+		"platform":    Platform,
+		"language":    "go",
+		"server": map[string]interface{}{
+			"host": hostname,
+			"root": ServerRoot,
+		},
+		"notifier": map[string]interface{}{
+			"name":    NAME,
+			"version": VERSION,
+		},
 	}
-	errBody := map[string]interface{}{"trace_chain": traceChain}
+	if CodeVersion != "" {
+		data["code_version"] = CodeVersion
+	}
+
+	return map[string]interface{}{
+		"access_token": Token,
+		"data":         data,
+	}
+}
+
+// errorBody generates a Rollbar error body with a given stack trace.
+func errorBody(err error, stack Stack) (map[string]interface{}, string) {
+	message := nilErrTitle
+	if err != nil {
+		message = err.Error()
+	}
+
+	fingerprint := stack.Fingerprint() + message
+	errBody := map[string]interface{}{
+		"trace": map[string]interface{}{
+			"frames": stack,
+			"exception": map[string]interface{}{
+				"class":   errorClass(err),
+				"message": message,
+			},
+		},
+	}
 	return errBody, fingerprint
 }
 
-// builds one trace element in trace_chain
-func buildTrace(err error, stack Stack) map[string]interface{} {
+// errorRequest extracts details from a Request in a format that Rollbar
+// accepts.
+func errorRequest(r *http.Request) map[string]interface{} {
+	cleanQuery := filterParams(r.URL.Query())
+
 	return map[string]interface{}{
-		"frames": stack,
-		"exception": map[string]interface{}{
-			"class":   errorClass(err),
-			"message": err.Error(),
-		},
+		"url":     r.URL.String(),
+		"method":  r.Method,
+		"headers": flattenValues(r.Header),
+
+		// GET params
+		"query_string": url.Values(cleanQuery).Encode(),
+		"GET":          flattenValues(cleanQuery),
+
+		// POST / PUT params
+		"POST":    flattenValues(filterParams(r.Form)),
+		"user_ip": r.RemoteAddr,
 	}
 }
 
-func getCause(err error) error {
-	if cs, ok := err.(CauseStacker); ok {
-		return cs.Cause()
-	} else {
-		return nil
+// filterParams filters sensitive information like passwords from being sent to
+// Rollbar.
+func filterParams(values map[string][]string) map[string][]string {
+	for key := range values {
+		if FilterFields.Match([]byte(key)) {
+			values[key] = []string{FILTERED}
+		}
 	}
+
+	return values
 }
 
-// gets Stack from errors that provide one of their own
-// otherwise, builds a new stack
-func getOrBuildStack(err error, parent error, skip int) Stack {
-	if cs, ok := err.(CauseStacker); ok {
-		if s := cs.Stack(); s != nil {
-			return s
-		}
-	} else {
-		if _, ok := parent.(CauseStacker); !ok {
-			return BuildStack(4 + skip)
+func flattenValues(values map[string][]string) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	for k, v := range values {
+		if len(v) == 1 {
+			result[k] = v[0]
+		} else {
+			result[k] = v
 		}
 	}
 
-	return make(Stack, 0)
+	return result
 }
 
 // Build a message inner-body for the given message string.
@@ -237,6 +325,10 @@ func messageBody(s string) map[string]interface{} {
 }
 
 func errorClass(err error) string {
+	if err == nil {
+		return nilErrTitle
+	}
+
 	class := reflect.TypeOf(err).String()
 	if class == "" {
 		return "panic"
@@ -248,9 +340,50 @@ func errorClass(err error) string {
 	}
 }
 
-// -- rollbarError
+// -- POST handling
 
-func rollbarError(format string, args ...interface{}) {
-	format = "Rollbar error: " + format + "\n"
-	log.Printf(format, args...)
+// Queue the given JSON body to be POSTed to Rollbar.
+func push(body map[string]interface{}) {
+	if len(bodyChannel) < Buffer {
+		waitGroup.Add(1)
+		bodyChannel <- body
+	} else {
+		stderr("buffer full, dropping error on the floor")
+	}
+}
+
+// POST the given JSON body to Rollbar synchronously.
+func post(body map[string]interface{}) error {
+	if len(Token) == 0 {
+		stderr("empty token")
+		return nil
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		stderr("failed to encode payload: %s", err.Error())
+		return err
+	}
+
+	resp, err := http.Post(Endpoint, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		stderr("POST failed: %s", err.Error())
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		stderr("received response: %s", resp.Status)
+		return ErrHTTPError(resp.StatusCode)
+	}
+
+	return nil
+}
+
+// -- stderr
+func stderr(format string, args ...interface{}) {
+	if ErrorWriter != nil {
+		format = "Rollbar error: " + format + "\n"
+		fmt.Fprintf(ErrorWriter, format, args...)
+	}
 }

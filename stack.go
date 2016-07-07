@@ -9,22 +9,23 @@ import (
 )
 
 var (
-	knownFilePathPatterns []string = []string{
-		"github.com/",
-		"code.google.com/",
-		"bitbucket.org/",
-		"launchpad.net/",
+	knownSrcPrefixes []string = []string{
+		"/src/",
+		"/vendor/",
 	}
 )
 
+// Frame is a single line of executed code in a Stack.
 type Frame struct {
 	Filename string `json:"filename"`
 	Method   string `json:"method"`
 	Line     int    `json:"lineno"`
 }
 
+// Stack represents a stacktrace as a slice of Frames.
 type Stack []Frame
 
+// BuildStack builds a full stacktrace for the current execution location.
 func BuildStack(skip int) Stack {
 	stack := make(Stack, 0)
 
@@ -33,17 +34,16 @@ func BuildStack(skip int) Stack {
 		if !ok {
 			break
 		}
-		file = shortenFilePath(file)
+		file = ShortenFilePath(file)
 		stack = append(stack, Frame{file, functionName(pc), line})
 	}
 
 	return stack
 }
 
-// Create a fingerprint that uniqely identify a given message. We use the full
-// callstack, including file names. That ensure that there are no false duplicates
-// but also means that after changing the code (adding/removing lines), the
-// fingerprints will change. It's a trade-off.
+// Fingerprint builds a string that uniquely identifies a Rollbar item using
+// the full stacktrace. The fingerprint is used to ensure (to a reasonable
+// degree) that items are coalesced by Rollbar in a smart way.
 func (s Stack) Fingerprint() string {
 	hash := crc32.NewIEEE()
 	for _, frame := range s {
@@ -59,16 +59,16 @@ func (s Stack) Fingerprint() string {
 // Examples:
 //   /usr/local/go/src/pkg/runtime/proc.c -> pkg/runtime/proc.c
 //   /home/foo/go/src/github.com/rollbar/rollbar.go -> github.com/rollbar/rollbar.go
-func shortenFilePath(s string) string {
-	idx := strings.Index(s, "/src/pkg/")
-	if idx != -1 {
-		return s[idx+5:]
-	}
-	for _, pattern := range knownFilePathPatterns {
-		idx = strings.Index(s, pattern)
-		if idx != -1 {
-			return s[idx:]
+func ShortenFilePath(s string) string {
+	lastIndex := -1
+	for _, prefix := range knownSrcPrefixes {
+		index := strings.LastIndex(s, prefix) + len(prefix)
+		if index > lastIndex {
+			lastIndex = index
 		}
+	}
+	if lastIndex != -1 {
+		return s[lastIndex:]
 	}
 	return s
 }

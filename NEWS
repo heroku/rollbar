@@ -1,3 +1,24 @@
+0.4.0 - October 13, 2015
+========================
+
+* Added PostErrors(), which returns a channel that receives errors encountered
+  while POSTing items to the Rollbar API. Thanks @tike!
+* Added MIT license. See LICENSE. Thanks @paulmach!
+* It is now acceptable to send nil items. Thanks @paulmach!
+* Fixed a bug that caused custom fields to be ignored. Thanks @nazwa!
+* Added the ability to send the code_version attribute to Rollbar. Thanks
+  @ossareh!
+
+0.3.1 - December 9th, 2014
+==========================
+
+* ErrorWriter and Platform are now configurable. Thanks @Soulou!
+
+0.3.0 - October 30th, 2014
+==========================
+
+* Added support for passing custom fields to Rollbar. Thanks @Soulou!
+
 0.2.0 - September 30th, 2014
 ============================
 

@@ -46,14 +46,8 @@ func TestErrorClass(t *testing.T) {
 }
 
 func TestEverything(t *testing.T) {
-	SetToken(os.Getenv("TOKEN"))
-	SetEnvironment("test")
-	if GetToken() != os.Getenv("TOKEN") {
-		t.Error("Token should be as set")
-	}
-	if GetEnvironment() != "test" {
-		t.Error("Token should be as set")
-	}
+	Token = os.Getenv("TOKEN")
+	Environment = "test"
 
 	Error("critical", errors.New("Normal critical error"))
 	Error("error", &CustomError{"This is a custom error"})
@@ -76,45 +70,11 @@ func TestEverything(t *testing.T) {
 	Wait()
 }
 
-func TestBuildBody(t *testing.T) {
-	// custom provided at config time
-	baseCustom := map[string]interface{}{
-		"BASE_CUSTOM_KEY":       "BASE_CUSTOM_VALUE",
-		"OVERRIDDEN_CUSTOM_KEY": "BASE",
-	}
-	SetCustom(baseCustom)
-
-	// custom provided at call site
-	extraCustom := map[string]interface{}{
-		"EXTRA_CUSTOM_KEY":      "EXTRA_CUSTOM_VALUE",
-		"OVERRIDDEN_CUSTOM_KEY": "EXTRA",
-	}
-	body := std.(*AsyncClient).buildBody(ERR, "test error", extraCustom)
-
-	if body["data"] == nil {
-		t.Error("body should have data")
-	}
-	data := body["data"].(map[string]interface{})
-	if data["custom"] == nil {
-		t.Error("data should have custom")
-	}
-	custom := data["custom"].(map[string]interface{})
-	if custom["BASE_CUSTOM_KEY"] != "BASE_CUSTOM_VALUE" {
-		t.Error("custom should have base")
-	}
-	if custom["EXTRA_CUSTOM_KEY"] != "EXTRA_CUSTOM_VALUE" {
-		t.Error("custom should have extra")
-	}
-	if custom["OVERRIDDEN_CUSTOM_KEY"] != "EXTRA" {
-		t.Error("extra custom should overwrite base custom where keys match")
-	}
-}
-
 func TestErrorRequest(t *testing.T) {
 	r, _ := http.NewRequest("GET", "http://foo.com/somethere?param1=true", nil)
 	r.RemoteAddr = "1.1.1.1:123"
 
-	object := std.errorRequest(r)
+	object := errorRequest(r)
 
 	if object["url"] != "http://foo.com/somethere?param1=true" {
 		t.Errorf("wrong url, got %v", object["url"])
@@ -136,7 +96,7 @@ func TestFilterParams(t *testing.T) {
 		"access_token": []string{"one"},
 	}
 
-	clean := filterParams(std.FilterFields, values)
+	clean := filterParams(values)
 	if clean["password"][0] != FILTERED {
 		t.Error("should filter password parameter")
 	}
@@ -166,112 +126,74 @@ func TestFlattenValues(t *testing.T) {
 	}
 }
 
-type cs struct {
-	error
-	cause error
-	stack Stack
+func TestBuildError(t *testing.T) {
+	buildError(ERR, nil, BuildStack(0))
+	// this should not panic
 }
 
-func (cs cs) Cause() error {
-	return cs.cause
-}
+func TestCustomField(t *testing.T) {
+	body := buildError(ERR, errors.New("test-custom"), BuildStack(0), &Field{
+		Name: "custom",
+		Data: map[string]string{
+			"NAME1": "VALUE1",
+		},
+	})
 
-func (cs cs) Stack() Stack {
-	return cs.stack
-}
-
-func TestGetCauseOfStdErr(t *testing.T) {
-	if nil != getCause(fmt.Errorf("")) {
-		t.Error("cause should be nil for standard error")
+	dataField, ok := body["data"]
+	if !ok {
+		t.Error("should have field 'data'")
 	}
-}
 
-func TestGetCauseOfCauseStacker(t *testing.T) {
-	cause := fmt.Errorf("cause")
-	effect := cs{fmt.Errorf("effect"), cause, nil}
-	if cause != getCause(effect) {
-		t.Error("effect should return cause")
+	data, ok := dataField.(map[string]interface{})
+	if !ok {
+		t.Error("should be of type map[string]interface{}")
 	}
-}
 
-func TestGetOrBuildStackOfStdErrWithoutParent(t *testing.T) {
-	err := cs{fmt.Errorf(""), nil, BuildStack(0)}
-	if nil == getOrBuildStack(err, nil, 0) {
-		t.Error("should build stack if parent is not a CauseStacker")
+	custom, ok := data["custom"]
+	if !ok {
+		t.Error("should have field 'custom'")
 	}
-}
 
-func TestGetOrBuildStackOfStdErrWithParent(t *testing.T) {
-	cause := fmt.Errorf("cause")
-	effect := cs{fmt.Errorf("effect"), cause, BuildStack(0)}
-	if 0 != len(getOrBuildStack(cause, effect, 0)) {
-		t.Error("should return empty stack of stadard error if parent is CauseStacker")
+	customMap, ok := custom.(map[string]string)
+	if !ok {
+		t.Error("should be a map[string]string")
 	}
-}
 
-func TestGetOrBuildStackOfCauseStackerWithoutParent(t *testing.T) {
-	cause := fmt.Errorf("cause")
-	effect := cs{fmt.Errorf("effect"), cause, BuildStack(0)}
-	if effect.Stack()[0] != getOrBuildStack(effect, nil, 0)[0] {
-		t.Error("should use stack from effect")
+	val, ok := customMap["NAME1"]
+	if !ok {
+		t.Error("should have a key 'NAME1'")
+	}
+
+	if val != "VALUE1" {
+		t.Error("should be VALUE1")
 	}
 }
 
-func TestGetOrBuildStackOfCauseStackerWithParent(t *testing.T) {
-	cause := fmt.Errorf("cause")
-	effect := cs{fmt.Errorf("effect"), cause, BuildStack(0)}
-	effect2 := cs{fmt.Errorf("effect2"), effect, BuildStack(0)}
-	if effect.Stack()[0] != getOrBuildStack(effect2, effect, 0)[0] {
-		t.Error("should use stack from effect2")
-	}
-}
+func TestErrorRead(t *testing.T) {
+	Token = os.Getenv("TOKEN")
+	Environment = "test"
 
-func TestErrorBodyWithoutChain(t *testing.T) {
-	err := fmt.Errorf("ERR")
-	errorBody, fingerprint := errorBody(err, 0)
-	if nil != errorBody["trace"] {
-		t.Error("should not have trace element")
-	}
-	if nil == errorBody["trace_chain"] {
-		t.Error("should have trace_chain element")
-	}
-	traces := errorBody["trace_chain"].([]map[string]interface{})
-	if 1 != len(traces) {
-		t.Error("chain should contain 1 trace")
-	}
-	if "ERR" != traces[0]["exception"].(map[string]interface{})["message"] {
-		t.Error("chain should contain err")
-	}
-	if "0" == fingerprint {
-		t.Error("fingerprint should be auto-generated and non-zero. got: ", fingerprint)
-	}
-}
+	bckBuffer, bckEP := Buffer, Endpoint
+	defer func() {
+		Buffer, Endpoint = bckBuffer, bckEP
+	}()
 
-func TestErrorBodyWithChain(t *testing.T) {
-	cause := fmt.Errorf("cause")
-	effect := cs{fmt.Errorf("effect1"), cause, BuildStack(0)}
-	effect2 := cs{fmt.Errorf("effect2"), effect, BuildStack(0)}
-	errorBody, fingerprint := errorBody(effect2, 0)
-	if nil != errorBody["trace"] {
-		t.Error("should not have trace element")
-	}
-	if nil == errorBody["trace_chain"] {
-		t.Error("should have trace_chain element")
-	}
-	traces := errorBody["trace_chain"].([]map[string]interface{})
-	if 3 != len(traces) {
-		t.Error("chain should contain 3 traces")
-	}
-	if "effect2" != traces[0]["exception"].(map[string]interface{})["message"] {
-		t.Error("chain should contain effect2 first")
-	}
-	if "effect1" != traces[1]["exception"].(map[string]interface{})["message"] {
-		t.Error("chain should contain effect1 second")
-	}
-	if "cause" != traces[2]["exception"].(map[string]interface{})["message"] {
-		t.Error("chain should contain cause third")
-	}
-	if effect2.Stack().Fingerprint()+effect.Stack().Fingerprint()+"0" != fingerprint {
-		t.Error("fingerprint should be concatination of fingerprints in chain. got: ", fingerprint)
-	}
+	Buffer = 2
+	Endpoint = "https://does.not.exsist/foo/bar"
+
+	go func() {
+		errCount := 0
+		for err := range PostErrors() {
+			t.Log(err)
+			errCount++
+		}
+		if errCount != 2 {
+			t.Fatal("didn't receive the right number of errors", errCount)
+		}
+	}()
+
+	post(nil)
+	post(nil)
+
+	Wait()
 }
