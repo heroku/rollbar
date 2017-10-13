@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -105,9 +106,18 @@ type AsyncClient struct {
 	ServerRoot string
 	// custom: Any arbitrary metadata you want to send.
 	Custom map[string]interface{}
+	// Logger used to report errors when sending data to Rollbar, e.g.
+	// when the Rollbar API returns 409 Too Many Requests response.
+	// If not set, the client will use the standard log.Printf by default.
+	Logger ClientLogger
 	// Queue of messages to be sent.
 	bodyChannel chan map[string]interface{}
 	waitGroup   sync.WaitGroup
+}
+
+// ClientLogger is the interface used by the rollbar Client to report problems.
+type ClientLogger interface {
+	Printf(format string, args ...interface{})
 }
 
 // New returns the default implementation of a Client
@@ -355,30 +365,44 @@ func (c *AsyncClient) push(body map[string]interface{}) {
 		c.waitGroup.Add(1)
 		c.bodyChannel <- body
 	} else {
-		rollbarError("buffer full, dropping error on the floor")
+		c.logError("buffer full, dropping error on the floor")
 	}
 }
 
 // POST the given JSON body to Rollbar synchronously.
 func (c *AsyncClient) post(body map[string]interface{}) {
 	if len(c.Token) == 0 {
-		rollbarError("empty token")
+		c.logError("empty token")
 		return
 	}
 
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		rollbarError("failed to encode payload: %s", err.Error())
+		c.logError("failed to encode payload: %s", err.Error())
 		return
 	}
 
 	resp, err := http.Post(c.Endpoint, "application/json", bytes.NewReader(jsonBody))
 	if err != nil {
-		rollbarError("POST failed: %s", err.Error())
+		c.logError("POST failed: %s", err.Error())
 	} else if resp.StatusCode != 200 {
-		rollbarError("received response: %s", resp.Status)
+		c.logError("received response: %s", resp.Status)
 	}
 	if resp != nil {
-		resp.Body.Close()
+		err = resp.Body.Close()
+		if err != nil {
+			c.logError("could not close body: %s", err.Error())
+		}
+	}
+}
+
+// -- Log errors
+
+func (c *AsyncClient) logError(format string, args ...interface{}) {
+	format = "Rollbar error: " + format + "\n"
+	if c.Logger != nil {
+		c.Logger.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
 	}
 }
