@@ -3,7 +3,6 @@ package rollbar
 import (
 	"fmt"
 	"hash/adler32"
-	"log"
 	"net/http"
 	"os"
 	"reflect"
@@ -58,6 +57,12 @@ func SetServerRoot(serverRoot string) {
 // custom: Any arbitrary metadata you want to send.
 func SetCustom(custom map[string]interface{}) {
 	std.SetCustom(custom)
+}
+
+// Logger to report Client problems when sending requests to Rollbar.
+// By default it is the standard log from the standard library.
+func SetClientLogger(logger ClientLogger) {
+	std.Logger = logger
 }
 
 // -- Getters
@@ -246,11 +251,4 @@ func errorClass(err error) string {
 	} else {
 		return strings.TrimPrefix(class, "*")
 	}
-}
-
-// -- rollbarError
-
-func rollbarError(format string, args ...interface{}) {
-	format = "Rollbar error: " + format + "\n"
-	log.Printf(format, args...)
 }
