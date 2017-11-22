@@ -283,34 +283,38 @@ func (c *AsyncClient) Close() error {
 func (c *AsyncClient) buildBody(level, title string, extras map[string]interface{}) map[string]interface{} {
 	timestamp := time.Now().Unix()
 
-	custom := c.Custom
-	for k, v := range extras {
-		custom[k] = v
-	}
-
-	data := map[string]interface{}{
-		"environment":  c.Environment,
-		"title":        title,
-		"level":        level,
-		"timestamp":    timestamp,
-		"platform":     runtime.GOOS,
-		"language":     "go",
-		"code_version": c.CodeVersion,
-		"server": map[string]interface{}{
-			"host": c.ServerHost,
-			"root": c.ServerRoot,
-		},
-		"notifier": map[string]interface{}{
-			"name":    NAME,
-			"version": VERSION,
-		},
-		"custom": custom,
-	}
-
 	return map[string]interface{}{
 		"access_token": c.Token,
-		"data":         data,
+		"data": map[string]interface{}{
+			"environment":  c.Environment,
+			"title":        title,
+			"level":        level,
+			"timestamp":    timestamp,
+			"platform":     runtime.GOOS,
+			"language":     "go",
+			"code_version": c.CodeVersion,
+			"server": map[string]interface{}{
+				"host": c.ServerHost,
+				"root": c.ServerRoot,
+			},
+			"notifier": map[string]interface{}{
+				"name":    NAME,
+				"version": VERSION,
+			},
+			"custom": buildCustom(c.Custom, extras),
+		},
 	}
+}
+
+func buildCustom(custom map[string]interface{}, extras map[string]interface{}) map[string]interface{} {
+	m := map[string]interface{}{}
+	for k, v := range custom {
+		m[k] = v
+	}
+	for k, v := range extras {
+		m[k] = v
+	}
+	return m
 }
 
 // Extract error details from a Request to a format that Rollbar accepts.
