@@ -203,7 +203,7 @@ func buildTrace(err error, stack Stack) map[string]interface{} {
 		"frames": stack,
 		"exception": map[string]interface{}{
 			"class":   errorClass(err),
-			"message": err.Error(),
+			"message": sanitize(err.Error()),
 		},
 	}
 }
@@ -246,7 +246,7 @@ func errorClass(err error) string {
 	if class == "" {
 		return "panic"
 	} else if class == "*errors.errorString" {
-		checksum := adler32.Checksum([]byte(err.Error()))
+		checksum := adler32.Checksum([]byte(sanitize(err.Error())))
 		return fmt.Sprintf("{%x}", checksum)
 	} else {
 		return strings.TrimPrefix(class, "*")
