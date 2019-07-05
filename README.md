@@ -8,6 +8,12 @@ background goroutine.
 Because Go's `error` type doesn't include stack information from when it was set
 or allocated, we use the stack information from where the error was reported.
 
+Official Libary
+================
+
+This library has been taken over by Rollbar as an officially supported SDK and can be found
+[here](https://github.com/rollbar/rollbar-go)
+
 Documentation
 =============
 
